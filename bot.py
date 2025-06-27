@@ -13,19 +13,32 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Підключення до SQLite
-conn = sqlite3.connect('session.db')
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS sessions
-             (chat_id INTEGER PRIMARY KEY, prompt TEXT, history TEXT)''')
-conn.commit()
+DB_PATH = 'session.db'
+
+# Функція для отримання з'єднання з базою
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    return conn
+
+# Ініціалізація таблиці (один раз)
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS sessions
+                 (chat_id INTEGER PRIMARY KEY, prompt TEXT, history TEXT)''')
+    conn.commit()
+    conn.close()
 
 # ============================
 # Команди
 # ============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Вітаю! Я — GPT-4 фасилітатор. Використовуй /setprompt, щоб задати роль.\n/help — допомога.")
+    await update.message.reply_text(
+        "Вітаю! Я — GPT-4 фасилітатор.\n"
+        "Використовуй /setprompt, щоб задати роль.\n"
+        "/help — допомога."
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -40,14 +53,20 @@ async def setprompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Будь ласка, введіть промт після команди.")
         return
     chat_id = update.effective_chat.id
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO sessions (chat_id, prompt, history) VALUES (?, ?, ?)", (chat_id, prompt, ""))
     conn.commit()
-    await update.message.reply_text(f"✅ Новий промт встановлено!")
+    conn.close()
+    await update.message.reply_text("✅ Новий промт встановлено!")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute("UPDATE sessions SET history = '' WHERE chat_id = ?", (chat_id,))
     conn.commit()
+    conn.close()
     await update.message.reply_text("🗑 Історію очищено.")
 
 # ============================
@@ -58,7 +77,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_message = update.message.text
 
-    # Отримати сесію
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute("SELECT prompt, history FROM sessions WHERE chat_id = ?", (chat_id,))
     row = c.fetchone()
 
@@ -77,23 +97,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if history:
         for line in history.split("|||"):
-            role, content = line.split("::", 1)
-            messages.append({"role": role, "content": content})
+            if line and "::" in line:
+                role, content = line.split("::", 1)
+                messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": user_message})
 
-    # Виклик OpenAI
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",  # або "gpt-4o-turbo" якщо хочеш turbo
+            messages=messages
+        )
+        reply = response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"OpenAI API error: {e}")
+        reply = "Вибачте, сталася помилка при обробці вашого запиту."
 
-    reply = response.choices[0].message.content
+    # Оновлюємо історію, якщо відповідь успішна
+    if reply and "Вибачте" not in reply:
+        new_history = history + f"user::{user_message}|||assistant::{reply}|||"
+        c.execute("UPDATE sessions SET history = ? WHERE chat_id = ?", (new_history, chat_id))
+        conn.commit()
 
-    # Оновлюємо історію
-    new_history = history + f"user::{user_message}|||assistant::{reply}|||"
-    c.execute("UPDATE sessions SET history = ? WHERE chat_id = ?", (new_history, chat_id))
-    conn.commit()
+    conn.close()
 
     await update.message.reply_text(reply)
 
@@ -102,6 +128,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================
 
 def main():
+    init_db()
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))

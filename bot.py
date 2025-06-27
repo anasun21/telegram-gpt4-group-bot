@@ -77,7 +77,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if history:
         for line in history.split("|||"):
-            role, content = line.split("::", 1)
+            if "::" in line:
+    role, content = line.split("::", 1)
+else:
+    # Якщо нема ::, вважай це повідомлення від користувача
+    role, content = "user", line
             messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": user_message})
